@@ -1,0 +1,28 @@
+{
+  "17841406762677979": {
+    "mode": "onboarding",
+    "step": 5,
+    "data": {
+      "name": "Hi",
+      "address": "What u can",
+      "hours": "Onboard",
+      "phone": "Давай",
+      "faq1q": "Давай"
+    }
+  },
+  "1516549772654622": {
+    "mode": "onboarding",
+    "step": 0,
+    "data": {}
+  },
+  "1946644142760816": {
+    "mode": "idle",
+    "step": 0,
+    "data": {}
+  },
+  "17841475416891865": {
+    "mode": "idle",
+    "step": 0,
+    "data": {}
+  }
+}
