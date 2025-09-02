@@ -64,10 +64,17 @@ function saveLead(lead) {
 // ── Intro message (English only)
 function introMessage() {
   return [
-    "Hi! I’m **Manoya** — your AI Sales Manager for Instagram.",
-    "I handle DMs, qualify leads, address objections, and guide clients to booking so you can focus on the work.",
-    "Our current starter package is **£200 (around $250)**: 30–40 min session, 10 retouched photos, all RAWs, and a 15–30s vertical reel.",
-    "How can I help right now — sales inquiries, content, or a general question?"
+    "👋 Hi, great to meet you! I’m **Manoya**, your AI Sales Manager.",
+    "",
+    "I’m not here to sell you a photoshoot. Instead, I replace human sales managers for businesses on Instagram:",
+    "• I automatically answer DMs in a professional, human-like way.",
+    "• I qualify leads, handle FAQs, and close sales.",
+    "• I collect contacts, build reports, and learn from new questions.",
+    "• I integrate with your Meta account so I can answer through your business profile, not mine.",
+    "",
+    "Think of me as your full-time sales assistant that never sleeps. 🚀",
+    "",
+    "To get started, type **/setup** and I’ll guide you through onboarding (offer, FAQs, leads storage)."
   ].join("\n");
 }
 
