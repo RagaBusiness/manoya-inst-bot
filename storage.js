@@ -1,37 +1,27 @@
-// MVP-хранилище контекста (профиль бизнеса, FAQ)
-// Потом можно заменить на Mongo/Supabase/Postgres
+// storage.js
+// Примитивный FAQ + контекст; можешь править под свой бизнес
 
-const businessProfile = {
-  brand: "Manoya",
-  about: "Мы делаем умных IG-ботов, отвечающих клиентам 24/7, ведём лидов до оплаты.",
-  hours: "Пн-Вс 10:00–20:00",
-  contacts: "support@manoya.ai",
-};
-
-const faq = [
-  { q: /цен|стоим|price/i, a: "Базовый план от $49/мес, про — от $199/мес. Дам подробности, если нужно :)" },
-  { q: /как подключ|как нач/i, a: "Доступ к IG Business странице + 3 клика в кабинете Meta. Помогу настроить." },
-  { q: /поддержк|support/i, a: "Пишите на support@manoya.ai — отвечаем быстро!" },
+const FAQ = [
+  { q: /price|стоим|цена|сколько/i, a: "Our base package is £400: 30–40 min shoot, 1 of 2 dresses, 10 retouched photos, all RAWs, and a 15–30s reel." },
+  { q: /hello|hi|привет/i, a: "Hi! How can we help your brand today?" },
+  { q: /refund|refunds|возврат/i, a: "We don’t offer refunds after a shoot is delivered, but we’re happy to adjust edits." }
 ];
 
-function lookupFAQ(text) {
-  const item = faq.find(f => f.q.test(text));
-  return item?.a || null;
+function lookupFAQ(msg) {
+  if (!msg) return null;
+  for (const item of FAQ) {
+    if (item.q.test(msg)) return item.a;
+  }
+  return null;
 }
 
 function composeContext() {
-  const faqLines = faq.map((f, i) => `- ${f.q} → ${f.a}`).join("\n");
-  return `Бренд: ${businessProfile.brand}
-О компании: ${businessProfile.about}
-Время работы: ${businessProfile.hours}
-Контакты: ${businessProfile.contacts}
-
-FAQ:
-${faqLines}
-`;
+  return [
+    "Brand: Manoya — AI-driven Instagram assistant for businesses.",
+    "We answer DMs and help with sales inquiries automatically.",
+    "If the user asks for price: £400 base package (30–40 min; 1 of 2 dresses; 10 retouched photos; RAWs; 15–30s reel).",
+    "If user asks something we don't know, politely ask 1 clarifying question."
+  ].join("\n");
 }
 
-module.exports = {
-  lookupFAQ,
-  composeContext
-};
+module.exports = { lookupFAQ, composeContext };

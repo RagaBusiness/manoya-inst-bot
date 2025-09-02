@@ -1,19 +1,21 @@
 {
-  "name": "manoya_inst_bot",
+  "name": "manoya-inst-bot",
   "version": "1.0.0",
   "private": true,
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
     "dev": "NODE_ENV=development nodemon index.js"
   },
   "dependencies": {
-    "axios": "1.7.4",
-    "body-parser": "1.20.2",
-    "dotenv": "16.4.5",
-    "express": "4.19.2"
+    "axios": "^1.7.7",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.54.0"
   },
   "devDependencies": {
-    "nodemon": "3.1.0"
+    "nodemon": "^3.1.0"
   }
 }

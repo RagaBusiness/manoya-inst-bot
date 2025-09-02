@@ -14,9 +14,10 @@ const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ID = process.env.PAGE_ID;
 
-// Вариант 1: уже есть PAGE access token -> кладём в .env PAGE_ACCESS_TOKEN
-// Вариант 2: есть только long-lived USER token -> можно получить PAGE token через /me/accounts
-let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+// В .env / Render Environment:
+// - PAGE_ACCESS_TOKEN (желательно page токен)
+//   либо временно USER LL (тогда ниже попробуем получить page токен автоматически)
+let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || process.env.ACCESS_TOKEN;
 
 // ===== helpers =====
 function logMeta(where, err) {
@@ -30,47 +31,47 @@ function logMeta(where, err) {
   }
 }
 
-// IG Send API
 async function sendIGReply(igScopedUserId, text) {
   try {
-    // В v23.0 отправка идёт на: POST /{PAGE_ID}/messages
+    if (!PAGE_ACCESS_TOKEN) throw new Error("PAGE_ACCESS_TOKEN missing");
     const url = `https://graph.facebook.com/v23.0/${PAGE_ID}/messages`;
-    await axios.post(url, {
-      recipient: { id: igScopedUserId },
-      message: { text }
-    }, {
-      params: { access_token: PAGE_ACCESS_TOKEN }
-    });
+    await axios.post(
+      url,
+      { recipient: { id: igScopedUserId }, message: { text } },
+      { params: { access_token: PAGE_ACCESS_TOKEN } }
+    );
   } catch (err) {
     logMeta("sendIGReply", err);
   }
 }
 
-// Если у нас в .env лежит USER long-lived токен (а не PAGE),
-// можно разово получить PAGE token (и сохранить вручную в .env).
+/**
+ * Если в переменных лежит USER LL токен (вместо page токена),
+ * попробуем разово дернуть /me/accounts и получить page access token.
+ * Это делается только в памяти процесса; в .env не записываем.
+ */
 async function maybeFetchPageTokenFromUserToken() {
-  if (PAGE_ACCESS_TOKEN && PAGE_ACCESS_TOKEN.startsWith("EA")) return;
-
   try {
-    const userToken = process.env.PAGE_ACCESS_TOKEN; // допустим, это LL user token
-    if (!userToken) return;
-
-    const { data } = await axios.get(
+    if (!PAGE_ACCESS_TOKEN) return;
+    // если токен уже похож на page-token (просто эвристика) — пропустим
+    // (Обычно и user, и page начинаются на EA..; поэтому лучше попытаться явно)
+    const res = await axios.get(
       "https://graph.facebook.com/v23.0/me/accounts",
-      { params: { access_token: userToken } }
+      { params: { access_token: PAGE_ACCESS_TOKEN } }
     );
-    const page = data.data.find(p => String(p.id) === String(PAGE_ID));
+    const page = res.data?.data?.find(p => String(p.id) === String(PAGE_ID));
     if (page?.access_token) {
       PAGE_ACCESS_TOKEN = page.access_token;
-      console.log("🟣 PAGE token получен из USER токена (в .env пока не записываем).");
+      console.log("🟣 PAGE token получен из USER LL токена (в памяти процесса).");
     }
   } catch (err) {
-    logMeta("fetch page token", err);
+    // это не критическая ошибка; просто логируем
+    logMeta("maybeFetchPageTokenFromUserToken", err);
   }
 }
 
 // ===== health =====
-app.get('/health', async (req, res) => {
+app.get('/health', (req, res) => {
   res.json({
     status: "ok",
     page_id: PAGE_ID ? "set" : "missing",
@@ -96,32 +97,23 @@ app.get('/webhook', (req, res) => {
 });
 
 // ===== webhook incoming (POST) =====
+// Формат для Messenger API for Instagram: body.entry[].messaging[]
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
-    // Логируем сырое
-    // console.log("📨 Incoming POST:", JSON.stringify(body, null, 2));
 
     if (body.object === 'instagram') {
       for (const entry of body.entry ?? []) {
         const messaging = entry.messaging ?? [];
         for (const event of messaging) {
-          if (event.message && event.sender) {
+          if (event.message && event.sender && event.sender.id) {
             const igUser = event.sender.id;
-            const text = (event.message.text || "").trim();
+            const text = (event.message?.text || "").trim();
 
-            // 1) быстрый FAQ
             let reply = lookupFAQ(text);
-
-            // 2) если FAQ не нашёл — спрашиваем ИИ
             if (!reply) {
               const context = composeContext();
-              try {
-                reply = await askAI({ userMessage: text, context });
-              } catch (err) {
-                console.error("AI error:", err?.message || err);
-                reply = "Спасибо за сообщение! Чуть позже вернусь с ответом.";
-              }
+              reply = await askAI({ userMessage: text, context });
             }
 
             await sendIGReply(igUser, reply);
@@ -143,8 +135,8 @@ app.listen(PORT, async () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   await maybeFetchPageTokenFromUserToken();
   if (PAGE_ACCESS_TOKEN) {
-    console.log("🟢 PAGE token готов.");
+    console.log(`🟢 PAGE token detected (len=${String(PAGE_ACCESS_TOKEN).length}).`);
   } else {
-    console.warn("⚠️ PAGE token отсутствует. Укажи PAGE_ACCESS_TOKEN в .env (или USER LL и PAGE_ID).");
+    console.warn("⚠️ PAGE token отсутствует. Укажи PAGE_ACCESS_TOKEN в переменных окружения (или USER LL и PAGE_ID).");
   }
 });
