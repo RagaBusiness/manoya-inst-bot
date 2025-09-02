@@ -1,7 +1,10 @@
+// index.js
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 const { askAI } = require('./ai');
 const { lookupFAQ, composeContext } = require('./storage');
@@ -14,9 +17,18 @@ const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ID = process.env.PAGE_ID;
 
-// Page токен напрямую; USER LL (в ACCESS_TOKEN) — опционально для авто-получения page токена
 let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || null;
-const USER_LL_TOKEN = process.env.ACCESS_TOKEN || null;
+const USER_LL_TOKEN = process.env.ACCESS_TOKEN || null; // optional: to fetch page token
+
+// ── Paths
+const DB_DIR = path.join(__dirname, 'db');
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+const CONFIG_PATH = path.join(DB_DIR, 'config.json');
+const LEADS_PATH = path.join(DB_DIR, 'leads.json');
+
+// ── State
+const seenUsers = new Set();         // to send intro once
+const setupState = new Map();        // senderId -> step (onboarding wizard)
 
 // ── Helpers
 function logMeta(where, err) {
@@ -30,7 +42,36 @@ function logMeta(where, err) {
   }
 }
 
-// Root + Health (для аптайма/проверок)
+function readJSON(p) {
+  try { return JSON.parse(fs.readFileSync(p)); } catch { return null; }
+}
+function writeJSON(p, data) {
+  fs.writeFileSync(p, JSON.stringify(data, null, 2));
+}
+
+function saveConfig(patch) {
+  const cur = readJSON(CONFIG_PATH) || {};
+  const next = { ...cur, ...patch };
+  writeJSON(CONFIG_PATH, next);
+  return next;
+}
+function saveLead(lead) {
+  const list = readJSON(LEADS_PATH) || [];
+  list.push({ ...lead, ts: new Date().toISOString() });
+  writeJSON(LEADS_PATH, list);
+}
+
+// ── Intro message (English only)
+function introMessage() {
+  return [
+    "Hi! I’m **Manoya** — your AI Sales Manager for Instagram.",
+    "I handle DMs, qualify leads, address objections, and guide clients to booking so you can focus on the work.",
+    "Our current starter package is **£200 (around $250)**: 30–40 min session, 10 retouched photos, all RAWs, and a 15–30s vertical reel.",
+    "How can I help right now — sales inquiries, content, or a general question?"
+  ].join("\n");
+}
+
+// Root + Health
 app.get('/', (_req, res) => res.status(200).send('OK'));
 app.get('/health', (_req, res) => {
   res.json({
@@ -40,7 +81,7 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Быстрый тест ИИ без Instagram: /debug/ai?prompt=Hello
+// Debug AI
 app.get('/debug/ai', async (req, res) => {
   try {
     const prompt = String(req.query.prompt || 'Hello from Manoya test');
@@ -51,7 +92,32 @@ app.get('/debug/ai', async (req, res) => {
   }
 });
 
-// Отправка IG сообщения
+// Debug Meta (simple self-check)
+app.get('/debug/meta', async (_req, res) => {
+  try {
+    const token = USER_LL_TOKEN || PAGE_ACCESS_TOKEN;
+    if (!token) return res.status(400).json({ ok: false, error: 'No token available' });
+    const me = await axios.get('https://graph.facebook.com/v23.0/me/accounts', {
+      params: { access_token: token }
+    });
+    res.json({ ok: true, accounts: me.data?.data?.length || 0, page_id: PAGE_ID });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.response?.data || e?.message });
+  }
+});
+
+// Weekly report skeleton
+app.get('/report/weekly', (_req, res) => {
+  const leads = readJSON(LEADS_PATH) || [];
+  const total = leads.length;
+  const byStatus = leads.reduce((acc, l) => {
+    acc[l.status || 'new'] = (acc[l.status || 'new'] || 0) + 1;
+    return acc;
+  }, {});
+  res.json({ ok: true, total_leads: total, byStatus });
+});
+
+// IG reply
 async function sendIGReply(igScopedUserId, text) {
   try {
     if (!PAGE_ACCESS_TOKEN) throw new Error('PAGE_ACCESS_TOKEN missing');
@@ -62,15 +128,17 @@ async function sendIGReply(igScopedUserId, text) {
       { params: { access_token: PAGE_ACCESS_TOKEN } }
     );
   } catch (err) {
+    if (err?.response?.data?.error?.error_subcode === 2018001) {
+      console.warn('↪️ IG says no matching user (likely echo/24h window).');
+      return;
+    }
     logMeta('sendIGReply', err);
   }
 }
 
-// Если есть USER LL, а Page токена нет — получим page токен один раз
 async function maybeFetchPageTokenFromUserToken() {
   try {
     if (!USER_LL_TOKEN || PAGE_ACCESS_TOKEN) return;
-
     const res = await axios.get(
       'https://graph.facebook.com/v23.0/me/accounts',
       { params: { access_token: USER_LL_TOKEN } }
@@ -78,16 +146,16 @@ async function maybeFetchPageTokenFromUserToken() {
     const page = res.data?.data?.find(p => String(p.id) === String(PAGE_ID));
     if (page?.access_token) {
       PAGE_ACCESS_TOKEN = page.access_token;
-      console.log('🟣 PAGE token получен из USER LL токена (в памяти процесса).');
+      console.log('🟣 PAGE token fetched from USER LL (in-memory).');
     } else {
-      console.warn('⚠️ Не нашли страницу с указанным PAGE_ID при /me/accounts.');
+      console.warn('⚠️ PAGE_ID not found in /me/accounts.');
     }
   } catch (err) {
     logMeta('maybeFetchPageTokenFromUserToken', err);
   }
 }
 
-// Webhook verify (GET)
+// Webhook verify
 app.get('/webhook', (req, res) => {
   try {
     const mode = req.query['hub.mode'];
@@ -103,7 +171,37 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Webhook incoming (POST)
+// ── Simple setup wizard (/setup)
+async function handleSetup(senderId, text) {
+  const step = setupState.get(senderId) || 1;
+
+  if (step === 1) {
+    setupState.set(senderId, 2);
+    await sendIGReply(senderId, "1/3 Describe your **niche and offer** (base price is £200 ≈ $250). Include what’s included and any add-ons.");
+    return;
+  }
+  if (step === 2) {
+    saveConfig({ offer: text });
+    setupState.set(senderId, 3);
+    await sendIGReply(senderId, "2/3 List **top FAQs and best answers** (separate by semicolons).");
+    return;
+  }
+  if (step === 3) {
+    const faqs = text.split(';').map(s => s.trim()).filter(Boolean);
+    saveConfig({ owner_faqs: faqs });
+    setupState.set(senderId, 4);
+    await sendIGReply(senderId, "3/3 Where to store leads? (email or Google Sheet/Airtable URL)");
+    return;
+  }
+  if (step === 4) {
+    saveConfig({ leads_sink: text });
+    setupState.delete(senderId);
+    await sendIGReply(senderId, "Done! Draft knowledge created. Switch mode with `/mode sandbox` (test), `/mode softlaunch`, or `/mode prod`.");
+    return;
+  }
+}
+
+// Webhook incoming
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -112,11 +210,51 @@ app.post('/webhook', async (req, res) => {
       for (const entry of body.entry ?? []) {
         const messaging = entry.messaging ?? [];
         for (const event of messaging) {
-          if (event.message && event.sender && event.sender.id) {
-            const igUser = event.sender.id;
-            const text = (event.message?.text || '').trim();
+          const msg = event.message;
+          const senderId = event.sender?.id;
 
-            console.log(`📩 IG message from ${igUser}: "${text}"`);
+          if (msg?.is_echo) { // ignore echos
+            console.log('↩️ Echo message ignored.');
+            continue;
+          }
+
+          if (msg && senderId) {
+            const text = (msg.text || '').trim();
+            console.log(`📩 IG message from ${senderId}: "${text}"`);
+
+            // One-time intro
+            if (!seenUsers.has(senderId)) {
+              seenUsers.add(senderId);
+              await sendIGReply(senderId, introMessage());
+            }
+
+            // Commands
+            if (/^\/capabilities$/i.test(text)) {
+              const reply = lookupFAQ('/capabilities');
+              await sendIGReply(senderId, reply);
+              return res.sendStatus(200);
+            }
+            if (/^\/setup$/i.test(text)) {
+              setupState.set(senderId, 1);
+              await handleSetup(senderId, text);
+              return res.sendStatus(200);
+            }
+            if (/^\/mode (sandbox|softlaunch|prod)$/i.test(text)) {
+              const mode = text.split(' ')[1];
+              saveConfig({ mode });
+              await sendIGReply(senderId, `Mode switched to: **${mode}**`);
+              return res.sendStatus(200);
+            }
+
+            // Save quick lead if message already contains contact/slots keywords (very simple heuristic)
+            if (/\b(whatsapp|email|@|\.com|\.co|phone|\+\d)/i.test(text)) {
+              saveLead({
+                ig_user: senderId,
+                intent: 'contact-provided',
+                raw: text,
+                status: 'new'
+              });
+            }
 
             // 1) FAQ
             let reply = lookupFAQ(text);
@@ -127,8 +265,8 @@ app.post('/webhook', async (req, res) => {
               reply = await askAI({ userMessage: text, context });
             }
 
-            console.log(`🤖 Reply to ${igUser}: "${reply}"`);
-            await sendIGReply(igUser, reply);
+            console.log(`🤖 Reply to ${senderId}: "${reply}"`);
+            await sendIGReply(senderId, reply);
           }
         }
       }
@@ -141,7 +279,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Глобальные обработчики, чтобы процесс не падал молча
+// Global error handlers
 process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
 });
@@ -156,6 +294,7 @@ app.listen(PORT, async () => {
   if (PAGE_ACCESS_TOKEN) {
     console.log(`🟢 PAGE token detected (len=${String(PAGE_ACCESS_TOKEN).length}).`);
   } else {
-    console.warn('⚠️ PAGE token отсутствует. Укажи PAGE_ACCESS_TOKEN или USER LL в ACCESS_TOKEN + PAGE_ID.');
+    console.warn('⚠️ PAGE token is missing. Provide PAGE_ACCESS_TOKEN or USER LL token in ACCESS_TOKEN with PAGE_ID.');
   }
 });
+
