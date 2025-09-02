@@ -1,4 +1,4 @@
-// ai.js (CommonJS)
+// ai.js
 const OpenAI = require('openai');
 
 const client = new OpenAI({
@@ -7,16 +7,19 @@ const client = new OpenAI({
 
 async function askAI({ userMessage, context }) {
   try {
+    if (!process.env.OPENAI_API_KEY) {
+      console.error("AI error: OPENAI_API_KEY is missing");
+      return "Извини, AI временно недоступен.";
+    }
+
     const messages = [
       {
         role: "system",
-        content:
-          "You are Manoya AI assistant for an Instagram business. Be concise, helpful, friendly, and answer in the user's language. If a short factual answer is enough, keep it short."
+        content: "You are Manoya AI assistant. Be concise, friendly and respond in the user's language."
       },
       {
         role: "user",
-        content:
-          `Context:\n${context || "N/A"}\n\nUser: ${userMessage}`
+        content: `Context:\n${context || "N/A"}\n\nUser: ${userMessage}`
       }
     ];
 
@@ -27,12 +30,19 @@ async function askAI({ userMessage, context }) {
       max_tokens: 300
     });
 
-    const text =
-      resp?.choices?.[0]?.message?.content?.trim() ||
-      "Спасибо! Чуть позже вернусь с ответом.";
+    const text = resp?.choices?.[0]?.message?.content?.trim();
+    if (!text) {
+      console.error("AI error: empty completion", resp);
+      return "Спасибо! Вернусь с ответом чуть позже.";
+    }
     return text;
   } catch (err) {
-    console.error("AI fatal:", err?.response?.data || err?.message || err);
+    // подробный лог, чтобы понять причину
+    if (err?.response?.data) {
+      console.error("AI error (API):", JSON.stringify(err.response.data, null, 2));
+    } else {
+      console.error("AI error (generic):", err?.message || err);
+    }
     return "Спасибо за сообщение! Чуть позже вернусь с ответом.";
   }
 }

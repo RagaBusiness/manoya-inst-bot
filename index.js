@@ -9,18 +9,16 @@ const { lookupFAQ, composeContext } = require('./storage');
 const app = express();
 app.use(bodyParser.json());
 
-// ───── ENV ─────────────────────────────────────────────────────────────
+// ── ENV
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ID = process.env.PAGE_ID;
 
-// Если уже есть Page токен — используем его.
-// Если нет, можно (временно) положить USER long-lived токен в ACCESS_TOKEN,
-// и мы попробуем на старте получить Page токен через /me/accounts.
+// Page токен напрямую; USER LL (в ACCESS_TOKEN) — опционально для авто-получения page токена
 let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || null;
 const USER_LL_TOKEN = process.env.ACCESS_TOKEN || null;
 
-// ───── Helpers ─────────────────────────────────────────────────────────
+// ── Helpers
 function logMeta(where, err) {
   if (err?.response) {
     console.error(`✗ ${where} error:`, {
@@ -32,10 +30,8 @@ function logMeta(where, err) {
   }
 }
 
-// Лёгкий корневой маршрут — помогает избегать 502 на “холодном” старте
+// Root + Health (для аптайма/проверок)
 app.get('/', (_req, res) => res.status(200).send('OK'));
-
-// Health-эндпоинт для быстрых проверок
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -44,7 +40,18 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// Отправка сообщения в Instagram (Messenger API for Instagram)
+// Быстрый тест ИИ без Instagram: /debug/ai?prompt=Hello
+app.get('/debug/ai', async (req, res) => {
+  try {
+    const prompt = String(req.query.prompt || 'Hello from Manoya test');
+    const text = await askAI({ userMessage: prompt, context: 'Debug route' });
+    res.json({ ok: true, prompt, answer: text });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Отправка IG сообщения
 async function sendIGReply(igScopedUserId, text) {
   try {
     if (!PAGE_ACCESS_TOKEN) throw new Error('PAGE_ACCESS_TOKEN missing');
@@ -59,7 +66,7 @@ async function sendIGReply(igScopedUserId, text) {
   }
 }
 
-// Если есть USER LL, а Page токена нет — один раз достаём Page токен
+// Если есть USER LL, а Page токена нет — получим page токен один раз
 async function maybeFetchPageTokenFromUserToken() {
   try {
     if (!USER_LL_TOKEN || PAGE_ACCESS_TOKEN) return;
@@ -68,10 +75,9 @@ async function maybeFetchPageTokenFromUserToken() {
       'https://graph.facebook.com/v23.0/me/accounts',
       { params: { access_token: USER_LL_TOKEN } }
     );
-
     const page = res.data?.data?.find(p => String(p.id) === String(PAGE_ID));
     if (page?.access_token) {
-      PAGE_ACCESS_TOKEN = page.access_token; // сохраняем в памяти процесса
+      PAGE_ACCESS_TOKEN = page.access_token;
       console.log('🟣 PAGE token получен из USER LL токена (в памяти процесса).');
     } else {
       console.warn('⚠️ Не нашли страницу с указанным PAGE_ID при /me/accounts.');
@@ -81,13 +87,12 @@ async function maybeFetchPageTokenFromUserToken() {
   }
 }
 
-// ───── Webhook verify (GET) ────────────────────────────────────────────
+// Webhook verify (GET)
 app.get('/webhook', (req, res) => {
   try {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       console.log('✅ Webhook verified');
       return res.status(200).send(challenge);
@@ -98,7 +103,7 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// ───── Webhook incoming (POST) ─────────────────────────────────────────
+// Webhook incoming (POST)
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -111,25 +116,24 @@ app.post('/webhook', async (req, res) => {
             const igUser = event.sender.id;
             const text = (event.message?.text || '').trim();
 
-            // Лог входящих — удобно при отладке
             console.log(`📩 IG message from ${igUser}: "${text}"`);
 
-            // 1) быстрый FAQ
+            // 1) FAQ
             let reply = lookupFAQ(text);
 
-            // 2) если FAQ не нашёл — спросим ИИ
+            // 2) AI
             if (!reply) {
               const context = composeContext();
               reply = await askAI({ userMessage: text, context });
             }
 
+            console.log(`🤖 Reply to ${igUser}: "${reply}"`);
             await sendIGReply(igUser, reply);
           }
         }
       }
       return res.sendStatus(200);
     }
-
     return res.sendStatus(404);
   } catch (err) {
     logMeta('webhook handler', err);
@@ -137,7 +141,7 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ───── Глобальные обработчики ошибок — чтобы процесс не падал молча ────
+// Глобальные обработчики, чтобы процесс не падал молча
 process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
 });
@@ -145,7 +149,7 @@ process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err);
 });
 
-// ───── Start ───────────────────────────────────────────────────────────
+// Start
 app.listen(PORT, async () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   await maybeFetchPageTokenFromUserToken();
