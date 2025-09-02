@@ -14,10 +14,10 @@ const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ID = process.env.PAGE_ID;
 
-// В .env / Render Environment:
-// - PAGE_ACCESS_TOKEN (желательно page токен)
-//   либо временно USER LL (тогда ниже попробуем получить page токен автоматически)
-let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || process.env.ACCESS_TOKEN;
+// Если есть готовый PAGE токен — используем.
+// Если нет, можно временно положить USER LL токен в ACCESS_TOKEN.
+let PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN || null;
+const USER_LL_TOKEN = process.env.ACCESS_TOKEN || null;
 
 // ===== helpers =====
 function logMeta(where, err) {
@@ -31,6 +31,7 @@ function logMeta(where, err) {
   }
 }
 
+// Отправка сообщения в Instagram
 async function sendIGReply(igScopedUserId, text) {
   try {
     if (!PAGE_ACCESS_TOKEN) throw new Error("PAGE_ACCESS_TOKEN missing");
@@ -45,27 +46,24 @@ async function sendIGReply(igScopedUserId, text) {
   }
 }
 
-/**
- * Если в переменных лежит USER LL токен (вместо page токена),
- * попробуем разово дернуть /me/accounts и получить page access token.
- * Это делается только в памяти процесса; в .env не записываем.
- */
+// Попробовать получить Page токен из USER LL (если Page токена нет)
 async function maybeFetchPageTokenFromUserToken() {
   try {
-    if (!PAGE_ACCESS_TOKEN) return;
-    // если токен уже похож на page-token (просто эвристика) — пропустим
-    // (Обычно и user, и page начинаются на EA..; поэтому лучше попытаться явно)
+    if (!USER_LL_TOKEN || PAGE_ACCESS_TOKEN) return;
+
     const res = await axios.get(
       "https://graph.facebook.com/v23.0/me/accounts",
-      { params: { access_token: PAGE_ACCESS_TOKEN } }
+      { params: { access_token: USER_LL_TOKEN } }
     );
+
     const page = res.data?.data?.find(p => String(p.id) === String(PAGE_ID));
     if (page?.access_token) {
       PAGE_ACCESS_TOKEN = page.access_token;
       console.log("🟣 PAGE token получен из USER LL токена (в памяти процесса).");
+    } else {
+      console.warn("⚠️ Не нашли страницу с таким PAGE_ID при /me/accounts.");
     }
   } catch (err) {
-    // это не критическая ошибка; просто логируем
     logMeta("maybeFetchPageTokenFromUserToken", err);
   }
 }
@@ -97,7 +95,6 @@ app.get('/webhook', (req, res) => {
 });
 
 // ===== webhook incoming (POST) =====
-// Формат для Messenger API for Instagram: body.entry[].messaging[]
 app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
@@ -137,6 +134,6 @@ app.listen(PORT, async () => {
   if (PAGE_ACCESS_TOKEN) {
     console.log(`🟢 PAGE token detected (len=${String(PAGE_ACCESS_TOKEN).length}).`);
   } else {
-    console.warn("⚠️ PAGE token отсутствует. Укажи PAGE_ACCESS_TOKEN в переменных окружения (или USER LL и PAGE_ID).");
+    console.warn("⚠️ PAGE token отсутствует. Укажи PAGE_ACCESS_TOKEN или USER LL в ACCESS_TOKEN + PAGE_ID.");
   }
 });
