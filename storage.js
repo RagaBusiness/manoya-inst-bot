@@ -1,43 +1,77 @@
 // storage.js
-// Быстрый FAQ и бизнес-контекст для ИИ
+const fs = require('fs');
+const path = require('path');
 
-const FAQ = [
-  { q: /^(hi|hello|hey|привет)\b/i,
-    a: "Hi! Great to meet you — I’m Manoya’s assistant. How can I help: sales inquiries, content, or general questions?" },
+const DB_DIR = path.join(__dirname, 'db');
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
 
-  { q: /(price|стоим|цена|сколько|сколько стоит|rates?)/i,
-    a: "Our current MVP package is £200. It includes a focused 30–40 min session, 10 professionally retouched photos, all RAWs, and a 15–30s vertical reel ready for social. Would you like to check availability?" },
+const CONFIG_PATH = path.join(DB_DIR, 'config.json');
+const LEADS_PATH  = path.join(DB_DIR, 'leads.json');
 
-  { q: /(book|booking|запис|availability|свободн|когда можно)/i,
-    a: "We can schedule within the next 7–10 days. Which city and 2–3 time windows work for you?" },
+const readJSON  = (p) => { try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; } };
+const writeJSON = (p, v) => fs.writeFileSync(p, JSON.stringify(v, null, 2));
 
-  { q: /(refund|возврат|cancel|отмен)/i,
-    a: "We allow date changes up to 24h before the shoot. Refunds aren’t offered after delivery, but we’re happy to adjust edits to your preference." },
+function readConfig()  { return readJSON(CONFIG_PATH) || {}; }
+function saveConfig(p) { const next={...readConfig(),...p}; writeJSON(CONFIG_PATH,next); return next; }
 
-  { q: /(what.*include|что.*включ|package|пакет)/i,
-    a: "The £200 MVP package includes: 30–40 min session • 10 retouched photos • all RAWs • 15–30s vertical reel. Add-ons on request." },
+function isInstalled() { return !!readConfig().installed; }
 
-  { q: /(contact|manager|human|человек|менеджер)/i,
-    a: "I can connect you with a manager for bespoke requests. Leave your WhatsApp or email, and preferred time to chat." },
-];
-
-function lookupFAQ(text) {
-  if (!text) return null;
-  for (const item of FAQ) {
-    if (item.q.test(text)) return item.a;
-  }
-  return null;
+function setAdmin(igUserId) {
+  const cfg = readConfig();
+  const admins = new Set([...(cfg.admins||[])]);
+  admins.add(String(igUserId));
+  saveConfig({ admins: Array.from(admins) });
+}
+function isAdmin(igUserId){
+  const cfg = readConfig();
+  const admins = new Set([...(cfg.admins||[])]);
+  return admins.has(String(igUserId));
 }
 
-function composeContext() {
-  // Краткий контекст, который ИИ видит при каждом ответе
+function saveLead(lead){
+  const list = readJSON(LEADS_PATH) || [];
+  list.push({ ...lead, ts: new Date().toISOString() });
+  writeJSON(LEADS_PATH, list);
+}
+
+function composeCustomerContext(){
+  const cfg = readConfig();
+  const brand = cfg.brand || "our brand";
+  const price = cfg.package_text
+    || "Starter package £200 (≈ $250): 30–40 min session, 10 retouched photos, all RAWs, 15–30s vertical reel.";
+  const included = cfg.included_text
+    || "Included: 30–40 min session • 10 retouched photos • all RAWs • 15–30s vertical reel. Add-ons available.";
+  const policy = cfg.policy_text
+    || "Reschedule ≥24h prior; no refunds after delivery; we can adjust edits.";
+  const availability = cfg.availability_text
+    || "Typical availability within 7–10 days.";
+
   return [
-    "Brand: Manoya — Instagram-first content & DM assistant.",
-    "Goal: respond expertly, convert interest into bookings, keep it concise and friendly.",
-    "Active offer: MVP package £200 — 30–40 min session; 10 retouched photos; all RAWs; 15–30s vertical reel; optional add-ons.",
-    "Policy: reschedule ≥24h; no refunds post-delivery; we adjust edits.",
-    "If user is unsure: ask 1 clarifying question, then propose next step (availability, brief, contact).",
+    `You are the company's sales manager. Brand: ${brand}.`,
+    "Never say you are an AI or Manoya. Speak as “we/our”. English only. Warm, concise, expert.",
+    "Primary goal: qualify quickly; move to booking; collect contact details.",
+    `Pricing: ${price}`,
+    `What's included: ${included}`,
+    `Policy: ${policy}`,
+    `Availability: ${availability}`,
+    "If info is missing, ask one specific follow-up question.",
   ].join("\n");
 }
 
-module.exports = { lookupFAQ, composeContext };
+function composeOwnerContext(){
+  const cfg = readConfig();
+  return [
+    "You are helping the business owner connect Manoya (AI Sales Manager).",
+    "English only. Be practical and concise.",
+    `Installed: ${cfg.installed? 'yes':'no'} | Mode: ${cfg.mode||'sandbox'}`,
+    "Collect: brand name, starter package line (£200 ≈ $250 + inclusions), policy, availability.",
+    "Confirm readiness for live after collecting info."
+  ].join("\n");
+}
+
+module.exports = {
+  readConfig, saveConfig, isInstalled,
+  setAdmin, isAdmin,
+  saveLead,
+  composeCustomerContext, composeOwnerContext
+};
