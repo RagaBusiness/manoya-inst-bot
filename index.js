@@ -31,6 +31,26 @@ const STATE_PATH = path.join(DB_DIR, 'chat_state.json');
 const readJSON = (p) => { try { return JSON.parse(fs.readFileSync(p)); } catch { return null; } };
 const writeJSON = (p, data) => fs.writeFileSync(p, JSON.stringify(data, null, 2));
 
+// ---- config helpers
+function readConfig() { return readJSON(CONFIG_PATH) || {}; }
+function saveConfig(patch) {
+  const cur = readConfig();
+  const next = { ...cur, ...patch };
+  writeJSON(CONFIG_PATH, next);
+  return next;
+}
+function isInstalled() {
+  const cfg = readConfig();
+  return !!cfg.installed; // true = уже подключены к бизнес-аккаунту клиента
+}
+
+// ---- leads
+function saveLead(lead) {
+  const list = readJSON(LEADS_PATH) || [];
+  list.push({ ...lead, ts: new Date().toISOString() });
+  writeJSON(LEADS_PATH, list);
+}
+
 // ---- per-user role memory { [userId]: { role: 'owner'|'customer', seenIntro: bool } }
 function getState() { return readJSON(STATE_PATH) || {}; }
 function setState(s) { writeJSON(STATE_PATH, s); }
@@ -50,32 +70,19 @@ function hasSeenIntro(userId) {
 // ---- heuristics: try to detect owner vs customer by text intent
 function detectRoleFromText(txt = "") {
   const t = txt.toLowerCase();
-  const ownerHints = /(connect|install|meta|webhook|render|token|page access|price for bot|pricing for bot|onboard|setup|integrat|how to add|my page|use your bot)/i;
+  const ownerHints = /(connect|install|meta|webhook|render|token|page access|price for bot|pricing for bot|onboard|setup|integrat|how to add|my page|use your bot|owner|manager)/i;
   const customerHints = /(price|cost|book|booking|availability|when|package|refund|shoot|session)/i;
   if (ownerHints.test(t) && !customerHints.test(t)) return 'owner';
   if (customerHints.test(t) && !ownerHints.test(t)) return 'customer';
   return null; // unclear
 }
 
-// ---- CONFIG/LEADS helpers
-function saveConfig(patch) {
-  const cur = readJSON(CONFIG_PATH) || {};
-  const next = { ...cur, ...patch };
-  writeJSON(CONFIG_PATH, next);
-  return next;
-}
-function saveLead(lead) {
-  const list = readJSON(LEADS_PATH) || [];
-  list.push({ ...lead, ts: new Date().toISOString() });
-  writeJSON(LEADS_PATH, list);
-}
-
-// ---- Intro messages (two audiences)
+// ---- Intros
 function ownerIntro() {
   return [
-    "👋 Hi! I’m **Manoya**, an AI Sales Manager for Instagram — the product you can connect to your business page.",
+    "👋 Hi! I’m **Manoya**, an AI Sales Manager you connect to your business page.",
     "I answer DMs like a human, qualify leads, store them to a table/CRM, learn from feedback, and send weekly reports.",
-    "To begin, run **/iam owner** (sets owner mode) and **/setup** — I’ll guide onboarding. You can switch anytime with `/iam customer`."
+    "To start, run **/setup** for onboarding. When you’re ready, set **/mode prod** and **/install done**."
   ].join("\n");
 }
 function customerIntro() {
@@ -180,7 +187,7 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-// Setup wizard state
+// Setup wizard
 const setupState = new Map(); // senderId -> step
 
 async function handleSetup(senderId, text) {
@@ -206,7 +213,7 @@ async function handleSetup(senderId, text) {
   if (step === 4) {
     saveConfig({ leads_sink: text });
     setupState.delete(senderId);
-    await sendIGReply(senderId, "Done! Draft knowledge created. Switch mode with `/mode sandbox` (test), `/mode softlaunch`, or `/mode prod`.");
+    await sendIGReply(senderId, "Done! Draft knowledge created. Switch mode with `/mode prod` when ready, then confirm install via `/install done`.");
     return;
   }
 }
@@ -228,30 +235,46 @@ app.post('/webhook', async (req, res) => {
             const text = (msg.text || '').trim();
             console.log(`📩 IG message from ${senderId}: "${text}"`);
 
-            // ROLE: manual commands
+            // ROLE manual commands
             if (/^\/iam owner$/i.test(text)) { setUserRole(senderId, 'owner'); await sendIGReply(senderId, "Role set to **owner**."); return res.sendStatus(200); }
             if (/^\/iam customer$/i.test(text)) { setUserRole(senderId, 'customer'); await sendIGReply(senderId, "Role set to **customer**."); return res.sendStatus(200); }
             if (/^\/resetmode$/i.test(text)) { const s = getState(); delete s[senderId]; setState(s); await sendIGReply(senderId, "Role reset. I’ll auto-detect from your next message."); return res.sendStatus(200); }
 
+            // install flag
+            if (/^\/install done$/i.test(text)) {
+              saveConfig({ installed: true });
+              await sendIGReply(senderId, "✅ Installation marked as done. I’ll now act for end customers by default.");
+              return res.sendStatus(200);
+            }
+
             // detect or use remembered role
             let role = getUserRole(senderId);
             if (!role) {
-              role = detectRoleFromText(text) || 'owner'; // default to owner when unclear (since you’re selling Manoya)
+              // if installed for business → default to customer
+              role = isInstalled() ? 'customer' : (detectRoleFromText(text) || 'owner');
               setUserRole(senderId, role);
             }
 
-            // one-time intro by role
+            // one-time intro by role (and STOP after intro)
             if (!hasSeenIntro(senderId)) {
               setSeenIntro(senderId);
               await sendIGReply(senderId, role === 'owner' ? ownerIntro() : customerIntro());
+              return res.sendStatus(200); // <── важное: больше ничего не отправляем
             }
 
             // owner-only commands
             if (role === 'owner') {
-              if (/^\/capabilities$/i.test(text)) { await sendIGReply(senderId, "Capabilities:\n" + lookupFAQ('/capabilities', 'owner')); return res.sendStatus(200); }
+              if (/^\/capabilities$/i.test(text)) {
+                const reply = "Capabilities:\n" + lookupFAQ('/capabilities', 'owner');
+                await sendIGReply(senderId, reply);
+                return res.sendStatus(200);
+              }
               if (/^\/setup$/i.test(text)) { setupState.set(senderId, 1); await handleSetup(senderId, text); return res.sendStatus(200); }
               if (/^\/mode (sandbox|softlaunch|prod)$/i.test(text)) {
-                const mode = text.split(' ')[1]; saveConfig({ mode }); await sendIGReply(senderId, `Mode switched to: **${mode}**`); return res.sendStatus(200);
+                const mode = text.split(' ')[1]; saveConfig({ mode }); await sendIGReply(senderId, `Mode switched to: **${mode}**`);
+                // авто-установка при проде, если хотим:
+                if (mode === 'prod') saveConfig({ installed: true });
+                return res.sendStatus(200);
               }
             }
 
@@ -290,10 +313,7 @@ process.on('uncaughtException', (err) => console.error('UNCAUGHT EXCEPTION:', er
 // Start
 app.listen(PORT, async () => {
   console.log(`🚀 Server is running on port ${PORT}`);
-  // try fetch PAGE token from USER LL if needed
-  try {
-    if (!PAGE_ACCESS_TOKEN && USER_LL_TOKEN) await maybeFetchPageTokenFromUserToken();
-  } catch {}
+  try { if (!PAGE_ACCESS_TOKEN && USER_LL_TOKEN) await maybeFetchPageTokenFromUserToken(); } catch {}
   if (PAGE_ACCESS_TOKEN) console.log(`🟢 PAGE token detected (len=${String(PAGE_ACCESS_TOKEN).length}).`);
   else console.warn('⚠️ PAGE token missing. Provide PAGE_ACCESS_TOKEN or USER LL in ACCESS_TOKEN + PAGE_ID.');
 });
